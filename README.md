@@ -1,109 +1,121 @@
-ZORA v1.0 --- Companion Desk
-ZORA is a compact ESP32-C3 companion device built around an OLED
-display, expressive RoboEyes animations, and Bluetooth Low Energy (BLE)
-integration through the Chronos Android app. It is designed to bring
-useful phone information to a small desk companion while keeping the
-firmware lightweight and avoiding a dedicated Wi-Fi connection.
-Current communication model: Chronos app ↔ BLE ↔ ZORA. The ESP32
-does not use Wi-Fi or make direct OpenWeather API requests in this
-firmware.
+# ZORA — Desk Companion & Garden IoT Device
 
-Features
-- Chronos BLE connection for supported phone data.
-- Clock and date synchronized through Chronos.
-- Weather screen using weather data provided by Chronos.
-- Phone notifications displayed on the OLED when forwarded by
-  Chronos.
-- Google Maps turn-by-turn navigation forwarded by Chronos over
-  BLE, including navigation instruction and available
-  direction/distance/ETA details.
-- RoboEyes expressions with idle animation and touch-triggered
-  emotion effects.
-- OLED boot animation and welcome melody using the display and
-  buzzer.
-- Touch controls for switching screens and triggering expressions.
-- No Wi-Fi required for the features listed above.
-Navigation display depends on the Chronos app forwarding navigation data
-successfully and the required Android notification access being enabled.
-The exact fields shown can depend on the navigation data supplied by the
-app.
-Hardware
-- ESP32-C3 Super Mini
-- 128 × 64 SSD1306 I²C OLED display (commonly address 0x3C)
-- Touch sensor
-- Buzzer
-- Optional wiring and enclosure components for the final build
-Current pin configuration
-  Component        ESP32-C3 GPIO
-  OLED SDA               GPIO 20
-  OLED SCL               GPIO 21
-  Touch sensor            GPIO 5
-  Buzzer                  GPIO 6
-Check the pin definitions in the sketch before wiring, especially if
-your hardware revision differs.
-Software and libraries
-- Arduino IDE with an ESP32-C3 board package
-- Adafruit GFX Library
-- Adafruit SSD1306
-- FluxGarage RoboEyes
-- ChronosESP32
-ChronosESP32 library: https://github.com/fbiego/chronos-esp32\
-Chronos Android app:
-https://play.google.com/store/apps/details?id=com.fbiego.chronos
-Use a Chronos app version that supports navigation forwarding to
-ChronosESP32 devices.
-Setup
-1. Install the ESP32 board support package and the libraries listed
-   above in Arduino IDE.
-2. Open ZORA_Chronos_BLE_Navigation.ino.
-3. Select the appropriate ESP32-C3 board and serial port.
-4. Verify the GPIO assignments against your wiring, then compile and
-   upload.
-5. Open Chronos on the Android phone and connect to the BLE device
-   named ZORA from within the Chronos app.
-6. Grant Chronos Notification access in Android settings so it can
-   forward supported notifications and navigation events.
-7. In Chronos, open ESP32 Manager and enable Navigation.
-8. Start a route in Google Maps and check that navigation instructions
-   appear on ZORA's OLED.
-Android troubleshooting
-If BLE shows Connected but navigation does not appear:
-- Run the Chronos Self Test and confirm it reports OK.
-- Re-check Android's Notification access for Chronos.
-- On MIUI/HyperOS devices, set Chronos battery usage to No
-  restrictions if that option is available.
-- Force-close and reopen Chronos, reconnect ZORA inside the app, then
-  test navigation again.
-A successful BLE connection alone does not guarantee that Android is
-forwarding navigation data.
-Touch controls
-The current sketch uses the following touch gestures:
-  Gesture                             Action
-  3 taps                              Clock screen
-  4 taps                              Weather screen
-  5 taps                              Crying expression
-  Touch and hold for about 900 ms     Angry expression
-  Google Maps navigation active and   Navigation screen can take over the
-  received                            OLED
-Gesture handling and navigation-screen priority are defined by the
-firmware; check the sketch if you customize these behaviors.
-Garden integration vision
-ZORA is also part of a broader smart-garden project direction. Future
-versions may communicate with other ESP-based garden devices, such as a
-soil-monitoring or automatic-watering unit. That integration is a
-development goal and is not implied to be active in the current BLE
-companion firmware.
-Notes and limitations
-- ZORA receives supported data through Chronos BLE; it does not
-  independently fetch Google Maps routes.
-- Navigation requires Google Maps navigation to be running on the
-  phone and Chronos to forward its navigation data.
-- Weather availability depends on weather data being present in
-  Chronos.
-- Notification and navigation forwarding depend on Android permissions
-  and background-app behavior.
-- BLE range and reliability depend on the phone, environment, and
-  power conditions.
-License
-Add a license file before publishing the repository if you want to
-specify reuse, modification, and distribution terms.
+**Version:** 1.0  
+**Project:** MZP | ZDYVOID  
+**Platform:** ESP32-C3 Super Mini  
+**Connectivity:** Bluetooth Low Energy (BLE) via Chronos
+
+ZORA is a custom-built IoT desk companion designed to combine interactive expressions, timekeeping, and smartphone connectivity in a compact desktop device.
+
+As part of the **MZP | ZDYVOID IoT ecosystem**, ZORA is envisioned to communicate with other ESP-based devices in the garden, including SmartPlant, while serving as an interactive desk companion.
+
+ZORA v1.0 connects to the **Chronos app** through Bluetooth Low Energy (BLE), enabling supported time and information features without requiring Wi-Fi for Bluetooth-based communication.
+
+> **Status:** v1.0 — Initial release  
+> More features and integrations are planned for future updates.
+
+---
+
+## Features
+
+- **Interactive RoboEyes** — Animated eyes for a more expressive desktop companion.
+- **Digital Clock** — Display the time and date with 3 consecutive touches.
+- **Weather Display** — Open the weather screen with 4 consecutive touches when supported weather data is available through Chronos.
+- **Sad Animation** — Trigger a crying expression with 5 consecutive touches.
+- **Angry Animation** — Hold the touch sensor to trigger an angry expression.
+- **BLE Connectivity** — Connect to the Chronos smartphone app using Bluetooth Low Energy.
+- **Compact Hardware Design** — Built around an ESP32-C3 Super Mini with an OLED display and a rechargeable battery system.
+- **Future IoT Integration** — Designed with the long-term goal of communicating with other ESP-based devices in the garden.
+- **Maps Navigation** - Navigate with Gmaps on your phone.![Uploading WhatsApp Image 2026-10-17 at 12.36.55.jpeg…]()
+<img width="899" height="1245" alt="WhatsApp Image 2026-10-17 at 12 24 21" src="https://github.com/user-attachments/assets/d1505433-5f7f-4ce4-8c29-211bd31cd6e4" />
+<img width="960" height="1280" alt="WhatsApp Image 2026-10-17 at 12 25 12" src="https://github.com/user-attachments/assets/f7ab5520-610e-43ae-830b-74d7b2e955cd" />
+<img width="960" height="1280" alt="WhatsApp Image 2026-10-17 at 12 25 12 (1)" src="https://github.com/user-attachments/assets/420478f6-20e9-4117-968b-2f0f5ca8578e" />
+
+
+## Hardware Components
+
+| Component | Description |
+|---|---|
+| ESP32-C3 Super Mini | Main controller with Wi-Fi and BLE capabilities |
+| 0.96-inch OLED | 128 × 64 display for RoboEyes, clock, and information |
+| Passive Buzzer | Audio feedback and interactive sound effects |
+| Small ON/OFF Switch | Main power control |
+| TP4056 USB Type-C Charging Module | Battery charging module with protection |
+| LiPo Battery | Rechargeable power source |
+| TTP223 Touch Sensor | Touch-based user interaction |
+| Custom Enclosure | Custom-designed case for the device |
+
+## Touch Controls
+
+| Input | Action |
+|---|---|
+| 3 consecutive touches | Open digital clock |
+| 4 consecutive touches | Open weather display |
+| 5 consecutive touches | Show sad animation |
+| Long touch | Show angry animation |
+
+*Touch sequences must be completed within the firmware's configured detection interval.*
+
+## Connectivity
+
+### Chronos BLE Integration
+
+ZORA v1.0 uses Bluetooth Low Energy to communicate with the Chronos app on Android.
+
+Supported functionality depends on the information and commands provided by the app and the installed firmware.
+
+- Time synchronization through BLE.
+- Weather information display when compatible data is received.
+- No Wi-Fi connection is required for BLE-based features.
+
+### Future Garden IoT Integration
+
+ZORA is part of a broader vision to connect desktop companions and garden IoT devices.
+
+Potential future integrations include:
+
+- Communication with ESP8266-based Wemos D1 mini and ESP32-based SmartPlant devices.
+- Sharing plant monitoring data and device status.
+- Cross-device notifications and interactive status updates.
+- A unified ecosystem for desktop companionship and smart gardening.
+
+*Communication between ZORA and other garden devices is a planned integration, not a confirmed feature of v1.0.*
+
+## Development Roadmap
+
+- [x] Interactive RoboEyes
+- [x] Touch-based expressions
+- [x] Chronos BLE integration
+- [x] Digital clock interface
+- [ ] Extended weather information
+- [ ] Communication with garden IoT devices
+- [ ] SmartPlant status integration
+- [ ] Additional expressions and animations
+- [ ] Future firmware improvements
+
+## Getting Started
+
+1. Assemble the hardware according to the project's wiring configuration.
+2. Install the required Arduino libraries for the ESP32-C3, OLED display, RoboEyes, and Chronos BLE integration.
+3. Open the ZORA firmware in Arduino IDE.
+4. Select the appropriate ESP32-C3 board and COM port.
+5. Upload the firmware.
+6. Open the Chronos app on Android and pair with ZORA through the app's device pairing interface.
+
+Library requirements and setup instructions may vary between firmware versions.
+
+## Project Information
+
+**Project name:** ZORA  
+**Version:** v1.0  
+**Developer / Project identity:** MZP | ZDYVOID  
+**Category:** Embedded Systems · IoT · BLE · Desk Companion · Smart Gardening
+
+ZORA is an evolving personal IoT project exploring the connection between interactive desktop devices and smart garden systems.
+
+**More features will be coming soon.**
+
+---
+
+**MZP | ZDYVOID**  
+*Building connected devices for the desk and the garden.*
