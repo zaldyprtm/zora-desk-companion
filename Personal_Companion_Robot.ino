@@ -10,6 +10,7 @@
 
 // =====================================================
 // ESP32-C3 SUPER MINI - ZORA ROBO EYES + CHRONOS BLE (NO WIFI)
+// MUZALPRA MZP ZDYVOID
 // =====================================================
 
 #define SCREEN_WIDTH  128
