@@ -26,9 +26,9 @@ ZORA v1.0 connects to the **Chronos app** through Bluetooth Low Energy (BLE), en
 - **BLE Connectivity** — Connect to the Chronos smartphone app using Bluetooth Low Energy.
 - **Compact Hardware Design** — Built around an ESP32-C3 Super Mini with an OLED display and a rechargeable battery system.
 - **Future IoT Integration** — Designed with the long-term goal of communicating with other ESP-based devices in the garden.
-- **Maps Navigation** - Navigate with Gmaps on your phone.![Uploading WhatsApp Image 2026-10-17 at 12.36.55.jpeg…]()
+- **Maps Navigation** - Navigate with Gmaps on your phone.<img width="1080" height="1440" alt="WhatsApp Image 2026-10-17 at 12 36 55" src="https://github.com/user-attachments/assets/f7661308-8b7c-489b-b811-974afdb662dd" />
+
 <img width="899" height="1245" alt="WhatsApp Image 2026-10-17 at 12 24 21" src="https://github.com/user-attachments/assets/d1505433-5f7f-4ce4-8c29-211bd31cd6e4" />
-<img width="960" height="1280" alt="WhatsApp Image 2026-10-17 at 12 25 12" src="https://github.com/user-attachments/assets/f7ab5520-610e-43ae-830b-74d7b2e955cd" />
 <img width="960" height="1280" alt="WhatsApp Image 2026-10-17 at 12 25 12 (1)" src="https://github.com/user-attachments/assets/420478f6-20e9-4117-968b-2f0f5ca8578e" />
 
 
