@@ -62,7 +62,8 @@ enum ScreenMode {
   MODE_EYES,
   MODE_CLOCK,
   MODE_WEATHER,
-  MODE_NOTIFICATION
+  MODE_NOTIFICATION,
+  MODE_NAVIGATION
 };
 
 ScreenMode screenMode = MODE_EYES;
@@ -104,6 +105,8 @@ String latestNotifApp = "";
 String latestNotifTitle = "";
 String latestNotifMessage = "";
 unsigned long notificationUntil = 0;
+unsigned long lastNavigationDraw = 0;
+bool navigationWasActive = false;
 
 // =====================================================
 // PASSIVE BUZZER - LEDC PWM
@@ -260,6 +263,7 @@ void bootAnimationAndWelcome() {
 
 void drawWeather();
 void drawNotification();
+void drawNavigation();
 
 // =====================================================
 // CHRONOS BLE - TIME, WEATHER, NOTIFICATIONS
@@ -300,6 +304,11 @@ void chronosConfigCallback(Config config, uint32_t a, uint32_t b) {
     }
   } else if (config == CF_HR24) {
     Serial.println("Pengaturan format jam diterima dari Chronos");
+  } else if (config == CF_NAV_DATA) {
+    Serial.print("Status navigasi Chronos berubah; active=");
+    Serial.println(a ? "true" : "false");
+  } else if (config == CF_NAV_ICON) {
+    Serial.println("Data ikon navigasi Chronos diterima");
   } else if (config == CF_WEATHER) {
     Serial.println("Pembaruan cuaca dari Chronos diterima");
     Serial.print("Kota: ");
@@ -445,6 +454,77 @@ void drawNotification() {
 
   display.setCursor(0, 56);
   display.print("Chronos BLE");
+  display.display();
+}
+
+// =====================================================
+// NAVIGATION SCREEN - Google Maps -> Chronos BLE -> ZORA
+// Tidak memakai Wi-Fi. Data navigasi dibaca dari library ChronosESP32.
+// =====================================================
+void drawNavigation() {
+  Navigation &nav = chronosWatch.getNavigation();
+
+  display.clearDisplay();
+  display.setTextColor(SSD1306_WHITE);
+  display.setTextSize(1);
+  display.setCursor(0, 0);
+  display.print("ZORA NAV");
+  display.setCursor(75, 0);
+  display.print("BLE");
+  display.drawLine(0, 10, 127, 10, SSD1306_WHITE);
+
+  if (!nav.active || !nav.isNavigation) {
+    display.setCursor(3, 23);
+    display.print("Menunggu Google Maps");
+    display.setCursor(3, 37);
+    display.print("Mulai rute di HP");
+    display.display();
+    return;
+  }
+
+  // Chronos mengirim ikon 48x48, 1 bit per pixel.
+  if (nav.hasIcon) {
+    display.drawBitmap(0, 14, nav.icon, 48, 48, SSD1306_WHITE);
+  } else {
+    // Panah sederhana sebagai fallback jika ikon belum tersedia.
+    String instruction = nav.directions;
+    instruction.toLowerCase();
+    int cx = 24;
+    if (instruction.indexOf("left") >= 0 || instruction.indexOf("kiri") >= 0) {
+      display.drawLine(cx + 12, 42, cx - 8, 42, SSD1306_WHITE);
+      display.drawLine(cx - 8, 42, cx + 1, 33, SSD1306_WHITE);
+      display.drawLine(cx - 8, 42, cx + 1, 51, SSD1306_WHITE);
+    } else if (instruction.indexOf("right") >= 0 || instruction.indexOf("kanan") >= 0) {
+      display.drawLine(cx - 12, 42, cx + 8, 42, SSD1306_WHITE);
+      display.drawLine(cx + 8, 42, cx - 1, 33, SSD1306_WHITE);
+      display.drawLine(cx + 8, 42, cx - 1, 51, SSD1306_WHITE);
+    } else {
+      display.drawLine(cx, 55, cx, 25, SSD1306_WHITE);
+      display.drawLine(cx, 25, cx - 9, 34, SSD1306_WHITE);
+      display.drawLine(cx, 25, cx + 9, 34, SSD1306_WHITE);
+    }
+  }
+
+  // Area kanan: jarak, instruksi, dan ETA jika tersedia.
+  display.setCursor(52, 15);
+  if (nav.distance.length()) display.print(nav.distance.substring(0, 12));
+  else display.print("NAVIGASI");
+
+  display.setCursor(52, 29);
+  if (nav.directions.length()) display.print(nav.directions.substring(0, 12));
+  else if (nav.title.length()) display.print(nav.title.substring(0, 12));
+  else display.print("Ikuti rute");
+
+  display.setCursor(52, 43);
+  if (nav.eta.length()) {
+    display.print("ETA ");
+    display.print(nav.eta.substring(0, 7));
+  } else if (nav.duration.length()) {
+    display.print(nav.duration.substring(0, 10));
+  }
+
+  display.setCursor(52, 56);
+  display.print("MAPS / BLE");
   display.display();
 }
 
@@ -616,6 +696,11 @@ void updateTouch() {
       suppressNextReleaseTap = true;
       return;
     }
+    // Pertahankan layar navigasi selama Google Maps masih mengirim rute.
+    if (screenMode == MODE_NAVIGATION) {
+      suppressNextReleaseTap = true;
+      return;
+    }
     if (screenMode != MODE_EYES) {
       returnToEyes();
       suppressNextReleaseTap = true;
@@ -648,6 +733,31 @@ void updateTouch() {
       if (tapCount < 5) tapCount++;
       lastTapTime = now;
     }
+  }
+}
+
+// Baca state navigasi yang diperbarui oleh ChronosESP32 saat data BLE masuk.
+// Navigasi otomatis mengambil alih OLED, lalu kembali ke RoboEyes saat rute selesai.
+void updateNavigationMode() {
+  Navigation &nav = chronosWatch.getNavigation();
+  bool activeNow = nav.active && nav.isNavigation;
+
+  if (activeNow) {
+    if (!navigationWasActive || screenMode != MODE_NAVIGATION) {
+      screenMode = MODE_NAVIGATION;
+      lastNavigationDraw = 0;
+      Serial.println("Navigasi aktif: OLED masuk mode ZORA NAV");
+    }
+    navigationWasActive = true;
+
+    if (millis() - lastNavigationDraw >= 250UL) {
+      lastNavigationDraw = millis();
+      drawNavigation();
+    }
+  } else if (navigationWasActive) {
+    navigationWasActive = false;
+    Serial.println("Navigasi selesai: kembali ke RoboEyes");
+    returnToEyes();
   }
 }
 
@@ -713,8 +823,8 @@ void setup() {
   Serial.print("Nama BLE ZORA: ZORA | Alamat: ");
   Serial.println(chronosWatch.getAddress());
 
-  Serial.println("RoboEyes + Chronos BLE Clock/Weather/Notifications siap (tanpa Wi-Fi)!");
-  Serial.println("3 tap = jam Chronos BLE | 4 tap = cuaca | 5 tap = menangis | tahan 900ms = marah");
+  Serial.println("RoboEyes + Chronos BLE Clock/Weather/Notifications/Navigation siap (tanpa Wi-Fi)!");
+  Serial.println("3 tap = jam | 4 tap = cuaca | 5 tap = menangis | tahan 900ms = marah | Maps aktif = navigasi OLED");
 }
 
 // =====================================================
@@ -723,6 +833,7 @@ void setup() {
 
 void loop() {
   chronosWatch.loop();  // wajib dipanggil terus untuk BLE dan sinkronisasi waktu
+  updateNavigationMode();
   updateTouch();
   updateBuzzer();
 
@@ -737,7 +848,9 @@ void loop() {
     return;
   }
 
-  if (screenMode == MODE_NOTIFICATION) {
+  if (screenMode == MODE_NAVIGATION) {
+    // Layar navigasi digambar periodik oleh updateNavigationMode().
+  } else if (screenMode == MODE_NOTIFICATION) {
     if ((long)(millis() - notificationUntil) >= 0) {
       returnToEyes();
     } else {
