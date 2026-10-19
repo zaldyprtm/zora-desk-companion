@@ -1,875 +1,992 @@
-
 #include <Arduino.h>
 #include <Wire.h>
-#include <esp_arduino_version.h>
-
+#include <Preferences.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <FluxGarage_RoboEyes.h>
 #include <ChronosESP32.h>
 
-// =====================================================
-// ESP32-C3 SUPER MINI - ZORA ROBO EYES + CHRONOS BLE (NO WIFI)
-// MUZALPRA MZP ZDYVOID
-// =====================================================
+// ============================================================
+// ZORA - ESP32-C3 SUPER MINI
+// RoboEyes + Chronos BLE + Clock + Weather + Navigation
+// ============================================================
 
-#define SCREEN_WIDTH  128
-#define SCREEN_HEIGHT 64
-#define OLED_ADDR     0x3C
+#define OLED_WIDTH 128
+#define OLED_HEIGHT 64
+#define OLED_ADDR 0x3C
+#define OLED_SDA 20
+#define OLED_SCL 21
+#define TOUCH_PIN 5
+#define BUZZER_PIN 6
+#define TOUCH_ACTIVE_LEVEL HIGH
 
-#define OLED_SDA      20
-#define OLED_SCL      21
-#define TOUCH_PIN      5
-#define BUZZER_PIN     6
-
-// Timing
-const unsigned long TOUCH_DEBOUNCE_MS = 40;
-const unsigned long TAP_TIMEOUT_MS = 700;
-const unsigned long LONG_TOUCH_MS = 900;
-const unsigned long ANGRY_DISPLAY_MS = 1000;
-const unsigned long CRY_DISPLAY_MS = 2800;
-const unsigned long EMOTION_FRAME_MS = 100;
-const unsigned long CLOCK_REFRESH_MS = 500;
-
-// Passive buzzer: nada startup + suara sentuh interaktif
-const uint16_t STARTUP_NOTES[] = {523, 659, 784, 1047, 784, 880, 1047, 1319};
-const uint16_t STARTUP_DURATIONS[] = {150, 150, 150, 260, 130, 150, 150, 420};
-const uint8_t STARTUP_NOTE_COUNT = sizeof(STARTUP_NOTES) / sizeof(STARTUP_NOTES[0]);
-
-// Untuk Arduino-ESP32 core 2.x
-const int BUZZER_CHANNEL = 0;
-
-// =====================================================
-// OBJECTS
-// =====================================================
-
-Adafruit_SSD1306 display(
-  SCREEN_WIDTH,
-  SCREEN_HEIGHT,
-  &Wire,
-  -1
-);
-
+Adafruit_SSD1306 display(OLED_WIDTH, OLED_HEIGHT, &Wire, -1);
 RoboEyes<Adafruit_SSD1306> roboEyes(display);
+Preferences preferences;
 ChronosESP32 chronosWatch("ZORA");
-bool chronosTimeSynced = false;
-bool chronosConnected = false;
 
-// =====================================================
-// SCREEN MODE
-// =====================================================
-
-enum ScreenMode {
-  MODE_EYES,
+enum AppMode {
+  MODE_HOME,
+  MODE_SETTINGS,
+  MODE_VOLUME,
+  MODE_NOTIFICATION,
   MODE_CLOCK,
   MODE_WEATHER,
-  MODE_NOTIFICATION,
   MODE_NAVIGATION
 };
 
-ScreenMode screenMode = MODE_EYES;
+AppMode currentMode = MODE_HOME;
 
-// =====================================================
-// STATE
-// =====================================================
+int volumeLevel = 65;
+const int VOLUME_MIN = 0;
+const int VOLUME_MAX = 100;
+const int VOLUME_STEP = 10;
 
-bool touchState = false;
-bool lastRawTouch = false;
-bool moveNE = true;
+bool bleConnected = false;
+bool notificationAvailable = false;
+
+String lastNotificationTitle = "";
+String lastNotificationBody = "";
+
+const char* settingItems[] = {
+  "Volume",
+  "Chronos BLE",
+  "Notifications",
+  "Back Home"
+};
+
+const int SETTINGS_COUNT =
+  sizeof(settingItems) / sizeof(settingItems[0]);
+
+int settingsIndex = 0;
+
+// ============================================================
+// TOUCH
+// ============================================================
+
+bool touchRawPrevious = false;
+bool touchStable = false;
+bool touchLongHandled = false;
+
+unsigned long touchChangedAt = 0;
+unsigned long touchPressedAt = 0;
+unsigned long lastTapAt = 0;
+unsigned long lastTouchActionAt = 0;
+
+const unsigned long TOUCH_DEBOUNCE_MS = 45;
+const unsigned long TAP_GAP_MS = 380;
+const unsigned long LONG_PRESS_MS = 900;
+const unsigned long TOUCH_LOCKOUT_MS = 100;
+
+int tapCount = 0;
+
+// ============================================================
+// BUZZER / MELODIES
+// ============================================================
+
+struct MelodyNote {
+  uint16_t frequency;
+  uint16_t duration;
+};
+
+MelodyNote melodyNotes[8];
+uint8_t melodyLength = 0;
+uint8_t melodyIndex = 0;
+uint8_t touchMelodyIndex = 0;
+
+bool melodyPlaying = false;
 bool buzzerActive = false;
-uint16_t soundNotes[4] = {0, 0, 0, 0};
-uint16_t soundDurations[4] = {0, 0, 0, 0};
-uint8_t soundNoteCount = 0;
-uint8_t soundNoteIndex = 0;
-unsigned long soundNoteStarted = 0;
-bool suppressNextReleaseTap = false;
-bool longTouchTriggered = false;
-unsigned long pressStartedAt = 0;
 
-enum EmotionMode { EMOTION_NONE, EMOTION_ANGRY, EMOTION_CRYING };
-EmotionMode emotionMode = EMOTION_NONE;
-unsigned long emotionUntil = 0;
-unsigned long lastEmotionFrame = 0;
-uint8_t emotionFrame = 0;
+unsigned long buzzerEndsAt = 0;
+unsigned long nextMelodyNoteAt = 0;
 
-unsigned long lastRawChange = 0;
-unsigned long lastTapTime = 0;
-unsigned long lastClockDraw = 0;
-
-uint8_t tapCount = 0;
-
-// =====================================================
-// CHRONOS WEATHER + NOTIFICATION STATE
-// =====================================================
-
-String latestNotifApp = "";
-String latestNotifTitle = "";
-String latestNotifMessage = "";
-unsigned long notificationUntil = 0;
-unsigned long lastNavigationDraw = 0;
-bool navigationWasActive = false;
-
-// =====================================================
-// PASSIVE BUZZER - LEDC PWM
-// Support Arduino-ESP32 core 2.x and 3.x
-// =====================================================
-
-bool initBuzzer() {
-#if ESP_ARDUINO_VERSION_MAJOR >= 3
-  return ledcAttach(BUZZER_PIN, 2000, 8);
-#else
-  ledcSetup(BUZZER_CHANNEL, 2000, 8);
-  ledcAttachPin(BUZZER_PIN, BUZZER_CHANNEL);
-  return true;
-#endif
+void stopMelody() {
+  melodyPlaying = false;
+  buzzerActive = false;
+  melodyLength = 0;
+  melodyIndex = 0;
+  noTone(BUZZER_PIN);
 }
 
-void buzzerTone(uint32_t frequency) {
-#if ESP_ARDUINO_VERSION_MAJOR >= 3
-  ledcWriteTone(BUZZER_PIN, frequency);
-#else
-  ledcWriteTone(BUZZER_CHANNEL, frequency);
-#endif
-}
+void startMelody(const MelodyNote* notes, uint8_t count) {
+  stopMelody();
 
-void playSoundSequence(const uint16_t* notes,
-                       const uint16_t* durations,
-                       uint8_t count) {
-  if (count == 0 || count > 4) return;
-
-  soundNoteCount = count;
-  soundNoteIndex = 0;
+  if (volumeLevel <= 0 || count == 0) return;
+  if (count > 8) count = 8;
 
   for (uint8_t i = 0; i < count; i++) {
-    soundNotes[i] = notes[i];
-    soundDurations[i] = durations[i];
+    melodyNotes[i] = notes[i];
   }
 
-  buzzerTone(soundNotes[0]);
-  soundNoteStarted = millis();
-  buzzerActive = true;
-}
-
-void playTouchSound(uint8_t tapNumber) {
-  static const uint16_t note1[] = {880, 1175};
-  static const uint16_t dur1[]  = {55, 85};
-  static const uint16_t note2[] = {784, 988, 1319};
-  static const uint16_t dur2[]  = {45, 45, 80};
-  static const uint16_t note3[] = {523, 784, 1047};
-  static const uint16_t dur3[]  = {65, 65, 120};
-  static const uint16_t note4[] = {1047, 784, 523};
-  static const uint16_t dur4[]  = {55, 55, 140};
-
-  switch (tapNumber) {
-    case 2: playSoundSequence(note2, dur2, 3); break;
-    case 3: playSoundSequence(note3, dur3, 3); break;
-    case 4: playSoundSequence(note4, dur4, 3); break;
-    default: playSoundSequence(note1, dur1, 2); break;
-  }
+  melodyLength = count;
+  melodyIndex = 0;
+  melodyPlaying = true;
+  nextMelodyNoteAt = millis();
 }
 
 void updateBuzzer() {
-  if (!buzzerActive) return;
+  unsigned long now = millis();
 
-  if (millis() - soundNoteStarted >= soundDurations[soundNoteIndex]) {
-    soundNoteIndex++;
-
-    if (soundNoteIndex >= soundNoteCount) {
-      buzzerTone(0);
-      buzzerActive = false;
-      soundNoteCount = 0;
-      return;
-    }
-
-    buzzerTone(soundNotes[soundNoteIndex]);
-    soundNoteStarted = millis();
+  if (buzzerActive && (long)(now - buzzerEndsAt) >= 0) {
+    noTone(BUZZER_PIN);
+    buzzerActive = false;
   }
+
+  if (!melodyPlaying ||
+      (long)(now - nextMelodyNoteAt) < 0) {
+    return;
+  }
+
+  if (melodyIndex >= melodyLength) {
+    stopMelody();
+    return;
+  }
+
+  MelodyNote note = melodyNotes[melodyIndex++];
+
+  unsigned long duration =
+    max(1, (int)note.duration * volumeLevel / 100);
+
+  if (note.frequency > 0 && volumeLevel > 0) {
+    tone(BUZZER_PIN, note.frequency);
+    buzzerActive = true;
+  } else {
+    noTone(BUZZER_PIN);
+    buzzerActive = false;
+  }
+
+  buzzerEndsAt = now + duration;
+  nextMelodyNoteAt = now + duration + 18;
 }
 
-// Gambar splash ZORA sambil memainkan melodi welcome.
-// Dipanggil setelah OLED berhasil diinisialisasi.
-void drawBootFrame(uint8_t progress, uint8_t frame) {
+void playTapSound() {
+  const MelodyNote melodies[8][4] = {
+    {{523,75},{659,75},{784,100},{0,0}},
+    {{659,70},{784,70},{988,110},{0,0}},
+    {{784,65},{988,65},{1175,100},{0,0}},
+    {{784,70},{659,70},{523,110},{0,0}},
+    {{523,65},{659,65},{784,65},{1047,130}},
+    {{988,65},{784,65},{659,100},{0,0}},
+    {{587,70},{740,70},{880,70},{1175,120}},
+    {{1047,65},{880,65},{784,65},{659,120}}
+  };
+
+  const uint8_t counts[8] = {3,3,3,3,4,3,4,4};
+
+  startMelody(
+    melodies[touchMelodyIndex],
+    counts[touchMelodyIndex]
+  );
+
+  touchMelodyIndex = (touchMelodyIndex + 1) % 8;
+}
+
+void playSelectSound() {
+  const MelodyNote n[] = {
+    {784,65},{988,65},{1175,65},{1568,120}
+  };
+  startMelody(n, 4);
+}
+
+void playBackSound() {
+  const MelodyNote n[] = {
+    {1047,80},{880,80},{698,130}
+  };
+  startMelody(n, 3);
+}
+
+void playConfirmSound() {
+  const MelodyNote n[] = {
+    {659,60},{784,60},{988,60},{1319,150}
+  };
+  startMelody(n, 4);
+}
+
+void playErrorSound() {
+  const MelodyNote n[] = {
+    {440,100},{349,150},{262,200}
+  };
+  startMelody(n, 3);
+}
+
+// ============================================================
+// SCREEN CACHE / SETTINGS
+// ============================================================
+
+AppMode lastDrawnMode = (AppMode)255;
+int lastDrawnSettingsIndex = -1;
+int lastDrawnVolume = -1;
+bool lastDrawnBle = false;
+
+void resetScreenCache() {
+  lastDrawnMode = (AppMode)255;
+  lastDrawnSettingsIndex = -1;
+  lastDrawnVolume = -1;
+  lastDrawnBle = !bleConnected;
+}
+
+void saveSettings() {
+  preferences.begin("zora", false);
+  preferences.putInt("volume", volumeLevel);
+  preferences.end();
+}
+
+void loadSettings() {
+  preferences.begin("zora", true);
+  volumeLevel = preferences.getInt("volume", 65);
+  preferences.end();
+
+  volumeLevel = constrain(
+    volumeLevel, VOLUME_MIN, VOLUME_MAX
+  );
+}
+
+// ============================================================
+// BOOT / HOME
+// ============================================================
+
+void showBootSplash() {
   display.clearDisplay();
   display.setTextColor(SSD1306_WHITE);
 
-  // Bingkai dan aksen sudut
-  display.drawRoundRect(2, 2, 124, 60, 7, SSD1306_WHITE);
-  display.drawLine(10, 8, 23, 8, SSD1306_WHITE);
-  display.drawLine(105, 55, 118, 55, SSD1306_WHITE);
-
   display.setTextSize(2);
-  display.setCursor(31, 9);
-  display.print("ZORA");
+  display.setCursor(28, 8);
+  display.println("ZORA");
 
   display.setTextSize(1);
-  display.setCursor(26, 29);
-  display.print("SMART COMPANION");
+  display.setCursor(31, 32);
+  display.println("BY ZDYVOID");
 
-  // Animasi titik bergerak
-  for (uint8_t i = 0; i < 3; i++) {
-    int x = 49 + i * 15;
-    bool active = ((frame + i) % 3) == 0;
-    if (active) display.fillCircle(x, 42, 2, SSD1306_WHITE);
-    else display.drawCircle(x, 42, 2, SSD1306_WHITE);
-  }
-
-  display.drawRoundRect(18, 49, 92, 7, 3, SSD1306_WHITE);
-  int fillWidth = (88 * progress) / 100;
-  if (fillWidth > 0) display.fillRoundRect(20, 51, fillWidth, 3, 1, SSD1306_WHITE);
+  display.setCursor(16, 46);
+  display.println("YOUR COMPANION");
 
   display.display();
-}
-
-void bootAnimationAndWelcome() {
-  Serial.println("ZORA boot animation + welcome melody...");
-
-  uint8_t frame = 0;
-  uint8_t progress = 0;
-
-  for (uint8_t i = 0; i < STARTUP_NOTE_COUNT; i++) {
-    buzzerTone(STARTUP_NOTES[i]);
-    unsigned long noteStart = millis();
-    while (millis() - noteStart < STARTUP_DURATIONS[i]) {
-      progress = (uint8_t)min(99UL,
-        ((unsigned long)(i * 100) / STARTUP_NOTE_COUNT) +
-        ((millis() - noteStart) * 100UL /
-         (STARTUP_NOTE_COUNT * STARTUP_DURATIONS[i])));
-      drawBootFrame(progress, frame++);
-      delay(35);
-    }
-
-    buzzerTone(0);
-    delay(25);
-  }
-
-  buzzerActive = false;
-  buzzerTone(0);
+  delay(1200);
 
   display.clearDisplay();
-  display.setTextColor(SSD1306_WHITE);
-  display.drawRoundRect(2, 2, 124, 60, 7, SSD1306_WHITE);
-  display.setTextSize(2);
-  display.setCursor(31, 10);
-  display.print("ZORA");
-  display.setTextSize(1);
-  display.setCursor(22, 34);
-  display.print("WELCOME ONLINE");
-  display.setCursor(31, 47);
-  display.print("Let's grow!");
   display.display();
-  delay(550);
-
-  Serial.println("Welcome melody selesai.");
 }
 
-void drawWeather();
-void drawNotification();
-void drawNavigation();
+void returnHome() {
+  currentMode = MODE_HOME;
+  tapCount = 0;
 
-// =====================================================
-// CHRONOS BLE - TIME, WEATHER, NOTIFICATIONS
-// Tidak memakai Wi-Fi / OpenWeather di ESP32-C3.
-// Data jam/cuaca/notifikasi dikirim aplikasi Chronos lewat BLE.
-// =====================================================
+  roboEyes.setMood(DEFAULT);
+  roboEyes.setPosition(DEFAULT);
+  roboEyes.setAutoblinker(ON, 3, 2);
+  roboEyes.setIdleMode(ON, 2, 2);
 
-void chronosConnectionCallback(bool state) {
-  chronosConnected = state;
-  Serial.println(state ? "Chronos BLE terhubung" : "Chronos BLE terputus");
+  resetScreenCache();
+  playBackSound();
 }
 
-void chronosNotificationCallback(Notification notification) {
-  latestNotifApp = notification.app;
-  latestNotifTitle = notification.title;
-  latestNotifMessage = notification.message;
-  notificationUntil = millis() + 5000UL;
-  screenMode = MODE_NOTIFICATION;
-  drawNotification();
+// ============================================================
+// CLOCK
+// ============================================================
 
-  Serial.println("Notifikasi Chronos diterima:");
-  Serial.println(latestNotifApp);
-  Serial.println(latestNotifTitle);
-  Serial.println(latestNotifMessage);
-}
-
-void chronosConfigCallback(Config config, uint32_t a, uint32_t b) {
-  (void)b;
-
-  if (config == CF_TIME) {
-    // ChronosESP32 melaporkan sinkronisasi waktu lewat callback ini.
-    if (a == 0) {
-      chronosTimeSynced = true;
-      Serial.print("Waktu dari Chronos: ");
-      Serial.println(chronosWatch.getTimeDate());
-    } else {
-      Serial.println("Chronos mengirim info waktu...");
-    }
-  } else if (config == CF_HR24) {
-    Serial.println("Pengaturan format jam diterima dari Chronos");
-  } else if (config == CF_NAV_DATA) {
-    Serial.print("Status navigasi Chronos berubah; active=");
-    Serial.println(a ? "true" : "false");
-  } else if (config == CF_NAV_ICON) {
-    Serial.println("Data ikon navigasi Chronos diterima");
-  } else if (config == CF_WEATHER) {
-    Serial.println("Pembaruan cuaca dari Chronos diterima");
-    Serial.print("Kota: ");
-    Serial.println(chronosWatch.getWeatherCity());
-    Serial.print("Jumlah data cuaca: ");
-    Serial.println(chronosWatch.getWeatherCount());
-    if (screenMode == MODE_WEATHER) {
-      drawWeather();
-    }
-  }
-}
-
-// =====================================================
-// CLOCK SCREEN
-// =====================================================
-
-void drawClock() {
+void drawClockScreen() {
   display.clearDisplay();
   display.setTextColor(SSD1306_WHITE);
   display.setTextSize(1);
 
   display.setCursor(0, 0);
-  display.println("ZORA | JAM WIB");
+  display.print("ZORA CLOCK");
+
+  display.setCursor(94, 0);
+  display.print(bleConnected ? "BLE+" : "BLE-");
+
   display.drawLine(0, 11, 127, 11, SSD1306_WHITE);
 
-  if (chronosTimeSynced) {
+  if (!bleConnected) {
+    display.setCursor(7, 25);
+    display.println("Connect Chronos app");
+
+    display.setCursor(7, 38);
+    display.println("to sync time.");
+  } else {
     String timeText = chronosWatch.getTime("%H:%M:%S");
-    String dateText = chronosWatch.getTime("%d-%m-%Y");
 
     display.setTextSize(2);
-    display.setCursor(8, 20);
+    display.setCursor(15, 19);
     display.println(timeText);
 
     display.setTextSize(1);
-    display.setCursor(30, 45);
-    display.println(dateText);
-  } else {
-    display.setCursor(4, 23);
-    display.println("Menunggu sync BLE...");
-    display.setCursor(4, 36);
-    display.println(chronosConnected ? "Chronos terhubung" : "Buka app Chronos");
+    display.setCursor(8, 46);
+    display.println(
+      chronosWatch.getTime("%a, %d/%m/%Y")
+    );
   }
 
-  display.setCursor(0, 56);
-  display.println(chronosConnected ? "BLE: CONNECTED" : "BLE: WAITING");
-
+  display.setCursor(0, 57);
+  display.print("Tap:Home");
   display.display();
 }
 
-// =====================================================
-// WEATHER SCREEN
-// =====================================================
+// ============================================================
+// WEATHER
+// ============================================================
 
-const char* weatherIconName(int icon) {
-  switch (icon) {
-    case 0: return "Berawan";
-    case 1: return "Cerah";
-    case 2: return "Salju";
-    case 3: return "Hujan";
-    case 4: return "Mendung";
-    case 5: return "Ekstrem";
-    case 6: return "Berangin";
-    case 7: return "Kabut";
-    default: return "Cuaca";
-  }
-}
-
-void drawWeather() {
+void drawWeatherScreen() {
   display.clearDisplay();
   display.setTextColor(SSD1306_WHITE);
   display.setTextSize(1);
 
   display.setCursor(0, 0);
-  display.print("CHRONOS WEATHER");
+  display.println("ZORA WEATHER");
+
   display.drawLine(0, 10, 127, 10, SSD1306_WHITE);
 
   int count = chronosWatch.getWeatherCount();
-  if (!chronosConnected || count <= 0) {
-    display.setCursor(0, 19);
-    display.println("Cuaca belum diterima");
-    display.setCursor(0, 32);
-    display.println("Buka aplikasi Chronos");
-    display.setCursor(0, 44);
-    display.println("aktifkan/sinkron cuaca");
-    display.setCursor(0, 56);
-    display.println("BLE only - tanpa WiFi");
-    display.display();
-    return;
+
+  if (!bleConnected) {
+    display.setCursor(0, 22);
+    display.println("Chronos disconnected");
+
+    display.setCursor(0, 35);
+    display.println("Connect phone first.");
+  } else if (count <= 0) {
+    display.setCursor(0, 22);
+    display.println("No weather data.");
+
+    display.setCursor(0, 35);
+    display.println("Check Chronos app.");
+  } else {
+    Weather &w = chronosWatch.getWeatherAt(0);
+
+    String city = chronosWatch.getWeatherCity();
+
+    if (city.length() > 20) {
+      city = city.substring(0, 20);
+    }
+
+    display.setCursor(0, 13);
+    display.println(city.length() ? city : "Current weather");
+
+    display.setTextSize(2);
+    display.setCursor(0, 25);
+    display.print(w.temp);
+    display.print(" C");
+
+    display.setTextSize(1);
+    display.setCursor(68, 27);
+    display.print("Icon ");
+    display.println(w.icon);
+
+    display.setCursor(0, 47);
+    display.print("High ");
+    display.print(w.high);
+    display.print("C Low ");
+    display.print(w.low);
+    display.println("C");
   }
 
-  String city = chronosWatch.getWeatherCity();
-  display.setCursor(0, 12);
-  display.print(city.substring(0, 20));
-
-  Weather today = chronosWatch.getWeatherAt(0);
-  display.setTextSize(2);
-  display.setCursor(0, 22);
-  display.print(today.temp);
-  display.print(" C");
-
-  display.setTextSize(1);
-  display.setCursor(72, 24);
-  display.print(weatherIconName(today.icon));
-
-  display.setCursor(0, 43);
-  display.print("H:");
-  display.print(today.high);
-  display.print("C L:");
-  display.print(today.low);
-  display.print("C");
-
-  display.setCursor(0, 55);
-  display.print("UV:");
-  display.print(today.uv);
-  display.print(" P:");
-  display.print(today.pressure);
-  display.print("hPa");
+  display.setCursor(0, 57);
+  display.print("Tap:Home");
 
   display.display();
 }
 
-void drawNotification() {
+// ============================================================
+// NAVIGATION
+// ============================================================
+
+void drawNavigationArrow(String directions) {
+  directions.toLowerCase();
+
+  if (directions.indexOf("left") >= 0 ||
+      directions.indexOf("kiri") >= 0) {
+
+    display.drawLine(40,34,75,34,SSD1306_WHITE);
+    display.drawLine(40,34,52,22,SSD1306_WHITE);
+    display.drawLine(40,34,52,46,SSD1306_WHITE);
+
+  } else if (directions.indexOf("right") >= 0 ||
+             directions.indexOf("kanan") >= 0) {
+
+    display.drawLine(40,34,75,34,SSD1306_WHITE);
+    display.drawLine(75,34,63,22,SSD1306_WHITE);
+    display.drawLine(75,34,63,46,SSD1306_WHITE);
+
+  } else {
+    display.drawLine(57,47,57,20,SSD1306_WHITE);
+    display.drawLine(57,20,45,32,SSD1306_WHITE);
+    display.drawLine(57,20,69,32,SSD1306_WHITE);
+  }
+}
+
+void drawNavigationScreen() {
   display.clearDisplay();
   display.setTextColor(SSD1306_WHITE);
   display.setTextSize(1);
 
   display.setCursor(0, 0);
-  display.print("ZORA | NOTIFIKASI");
+  display.println("ZORA NAVIGATION");
+
   display.drawLine(0, 10, 127, 10, SSD1306_WHITE);
 
-  display.setCursor(0, 13);
-  display.print(latestNotifApp.substring(0, 21));
-
-  display.setCursor(0, 24);
-  display.print(latestNotifTitle.substring(0, 21));
-
-  display.setCursor(0, 36);
-  display.print(latestNotifMessage.substring(0, 21));
-  if (latestNotifMessage.length() > 21) {
-    display.setCursor(0, 46);
-    display.print(latestNotifMessage.substring(21, 42));
-  }
-
-  display.setCursor(0, 56);
-  display.print("Chronos BLE");
-  display.display();
-}
-
-// =====================================================
-// NAVIGATION SCREEN - Google Maps -> Chronos BLE -> ZORA
-// Tidak memakai Wi-Fi. Data navigasi dibaca dari library ChronosESP32.
-// =====================================================
-void drawNavigation() {
   Navigation &nav = chronosWatch.getNavigation();
 
+  if (!bleConnected) {
+    display.setCursor(0, 23);
+    display.println("Chronos disconnected");
+
+    display.setCursor(0, 36);
+    display.println("Connect phone first.");
+
+  } else if (!nav.active) {
+    display.setCursor(0, 23);
+    display.println("No active route.");
+
+    display.setCursor(0, 36);
+    display.println("Start Google Maps.");
+
+  } else {
+    String instruction =
+      nav.directions.length() ? nav.directions : nav.title;
+
+    if (instruction.length() > 21) {
+      instruction = instruction.substring(0, 21);
+    }
+
+    display.setCursor(0, 13);
+    display.println(instruction);
+
+    drawNavigationArrow(nav.directions);
+
+    display.setCursor(0, 49);
+    display.print("Dist: ");
+    display.print(nav.distance);
+
+    display.setCursor(0, 58);
+    display.print("ETA: ");
+    display.print(nav.eta);
+  }
+
+  display.display();
+}
+
+// ============================================================
+// NOTIFICATIONS
+// ============================================================
+
+void drawNotificationScreen() {
   display.clearDisplay();
   display.setTextColor(SSD1306_WHITE);
   display.setTextSize(1);
+
   display.setCursor(0, 0);
-  display.print("ZORA NAV");
-  display.setCursor(75, 0);
-  display.print("BLE");
+  display.println("NOTIFICATION");
+
   display.drawLine(0, 10, 127, 10, SSD1306_WHITE);
 
-  if (!nav.active || !nav.isNavigation) {
-    display.setCursor(3, 23);
-    display.print("Menunggu Google Maps");
-    display.setCursor(3, 37);
-    display.print("Mulai rute di HP");
-    display.display();
-    return;
-  }
+  if (!notificationAvailable ||
+      lastNotificationTitle.length() == 0) {
 
-  // Chronos mengirim ikon 48x48, 1 bit per pixel.
-  if (nav.hasIcon) {
-    display.drawBitmap(0, 14, nav.icon, 48, 48, SSD1306_WHITE);
+    display.setCursor(0, 19);
+    display.println("No notification yet");
+
+    display.setCursor(0, 33);
+    display.println("Check Chronos access");
+
+    display.setCursor(0, 45);
+    display.println("to notifications.");
+
   } else {
-    // Panah sederhana sebagai fallback jika ikon belum tersedia.
-    String instruction = nav.directions;
-    instruction.toLowerCase();
-    int cx = 24;
-    if (instruction.indexOf("left") >= 0 || instruction.indexOf("kiri") >= 0) {
-      display.drawLine(cx + 12, 42, cx - 8, 42, SSD1306_WHITE);
-      display.drawLine(cx - 8, 42, cx + 1, 33, SSD1306_WHITE);
-      display.drawLine(cx - 8, 42, cx + 1, 51, SSD1306_WHITE);
-    } else if (instruction.indexOf("right") >= 0 || instruction.indexOf("kanan") >= 0) {
-      display.drawLine(cx - 12, 42, cx + 8, 42, SSD1306_WHITE);
-      display.drawLine(cx + 8, 42, cx - 1, 33, SSD1306_WHITE);
-      display.drawLine(cx + 8, 42, cx - 1, 51, SSD1306_WHITE);
-    } else {
-      display.drawLine(cx, 55, cx, 25, SSD1306_WHITE);
-      display.drawLine(cx, 25, cx - 9, 34, SSD1306_WHITE);
-      display.drawLine(cx, 25, cx + 9, 34, SSD1306_WHITE);
+    String title = lastNotificationTitle;
+    String body = lastNotificationBody;
+
+    if (title.length() > 21) {
+      title = title.substring(0, 21);
+    }
+
+    display.setCursor(0, 14);
+    display.println(title);
+
+    if (body.length() > 21) {
+      body = body.substring(0, 21);
+    }
+
+    display.setCursor(0, 29);
+    display.println(body);
+
+    if (lastNotificationBody.length() > 21) {
+      String line2 = lastNotificationBody.substring(
+        21, min(42, (int)lastNotificationBody.length())
+      );
+
+      display.setCursor(0, 40);
+      display.println(line2);
+    }
+
+    if (lastNotificationBody.length() > 42) {
+      String line3 = lastNotificationBody.substring(
+        42, min(63, (int)lastNotificationBody.length())
+      );
+
+      display.setCursor(0, 50);
+      display.println(line3);
     }
   }
 
-  // Area kanan: jarak, instruksi, dan ETA jika tersedia.
-  display.setCursor(52, 15);
-  if (nav.distance.length()) display.print(nav.distance.substring(0, 12));
-  else display.print("NAVIGASI");
-
-  display.setCursor(52, 29);
-  if (nav.directions.length()) display.print(nav.directions.substring(0, 12));
-  else if (nav.title.length()) display.print(nav.title.substring(0, 12));
-  else display.print("Ikuti rute");
-
-  display.setCursor(52, 43);
-  if (nav.eta.length()) {
-    display.print("ETA ");
-    display.print(nav.eta.substring(0, 7));
-  } else if (nav.duration.length()) {
-    display.print(nav.duration.substring(0, 10));
-  }
-
-  display.setCursor(52, 56);
-  display.print("MAPS / BLE");
   display.display();
 }
 
-// =====================================================
-// SCREEN CONTROL
-// =====================================================
+// ============================================================
+// SETTINGS / VOLUME
+// ============================================================
 
-// =====================================================
-// ZORA EMOTIONS: ANGRY + CRYING
-// =====================================================
-
-void playAngrySound() {
-  static const uint16_t notes[] = {330, 262, 196, 147};
-  static const uint16_t durations[] = {90, 100, 130, 180};
-  playSoundSequence(notes, durations, 4);
-}
-
-void playCryingSound() {
-  static const uint16_t notes[] = {988, 784, 659, 523};
-  static const uint16_t durations[] = {110, 150, 180, 260};
-  playSoundSequence(notes, durations, 4);
-}
-
-void drawAngryFace(uint8_t frame) {
+void drawSettings() {
   display.clearDisplay();
   display.setTextColor(SSD1306_WHITE);
   display.setTextSize(1);
-  display.setCursor(4, 3); display.print("ZORA");
-  display.setCursor(83, 3); display.print("ANGRY!");
-  display.drawLine(0, 13, 127, 13, SSD1306_WHITE);
 
-  int lift = (frame % 2) ? 1 : 0;
-  display.drawLine(20, 25, 47, 19 + lift, SSD1306_WHITE);
-  display.drawLine(81, 19 + lift, 108, 25, SSD1306_WHITE);
-  display.fillRoundRect(22, 27 + lift, 28, 13, 5, SSD1306_WHITE);
-  display.fillRoundRect(78, 27 + lift, 28, 13, 5, SSD1306_WHITE);
-  display.fillCircle(36, 33 + lift, 4, SSD1306_BLACK);
-  display.fillCircle(92, 33 + lift, 4, SSD1306_BLACK);
-  display.drawLine(47, 51, 55, 46, SSD1306_WHITE);
-  display.drawLine(55, 46, 73, 46, SSD1306_WHITE);
-  display.drawLine(73, 46, 81, 51, SSD1306_WHITE);
-  display.setCursor(40, 56); display.print("HMPH!");
+  display.setCursor(0, 0);
+  display.println("ZORA SETTINGS");
+
+  display.drawLine(0, 10, 127, 10, SSD1306_WHITE);
+
+  for (int i = 0; i < SETTINGS_COUNT; i++) {
+    int y = 13 + i * 10;
+
+    if (i == settingsIndex) {
+      display.fillRect(0, y, 128, 9, SSD1306_WHITE);
+      display.setTextColor(SSD1306_BLACK);
+    } else {
+      display.setTextColor(SSD1306_WHITE);
+    }
+
+    display.setCursor(2, y);
+    display.print(i == settingsIndex ? ">" : " ");
+    display.print(settingItems[i]);
+
+    if (i == 1) {
+      display.setCursor(99, y);
+      display.print(chronosWatch.isRunning() ? "ON" : "OFF");
+    }
+  }
+
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 57);
+  display.print("1:Next 2:Select");
   display.display();
 }
 
-void drawCryingFace(uint8_t frame) {
+void drawVolumeScreen() {
   display.clearDisplay();
   display.setTextColor(SSD1306_WHITE);
   display.setTextSize(1);
-  display.setCursor(4, 3); display.print("ZORA");
-  display.setCursor(78, 3); display.print("SAD MODE");
-  display.drawLine(0, 13, 127, 13, SSD1306_WHITE);
 
-  display.drawCircle(37, 31, 10, SSD1306_WHITE);
-  display.drawCircle(91, 31, 10, SSD1306_WHITE);
-  display.fillCircle(37, 33, 4, SSD1306_WHITE);
-  display.fillCircle(91, 33, 4, SSD1306_WHITE);
-  display.drawLine(23, 18, 34, 22, SSD1306_WHITE);
-  display.drawLine(34, 22, 47, 18, SSD1306_WHITE);
-  display.drawLine(81, 18, 94, 22, SSD1306_WHITE);
-  display.drawLine(94, 22, 105, 18, SSD1306_WHITE);
+  display.setCursor(0, 0);
+  display.println("VOLUME SETTINGS");
 
-  int tear1 = 38 + (frame % 4) * 3;
-  int tear2 = 38 + ((frame + 2) % 4) * 3;
-  display.fillCircle(25, tear1, 2, SSD1306_WHITE);
-  display.fillCircle(103, tear2, 2, SSD1306_WHITE);
-  display.drawRoundRect(57, 43, 14, 9, 4, SSD1306_WHITE);
-  display.setCursor(42, 56); display.print("DON'T GO...");
+  display.drawLine(0, 11, 127, 11, SSD1306_WHITE);
+
+  display.setTextSize(2);
+  display.setCursor(37, 20);
+  display.print(volumeLevel);
+  display.println("%");
+
+  display.drawRect(8, 45, 112, 9, SSD1306_WHITE);
+
+  int width = map(volumeLevel, 0, 100, 0, 106);
+
+  if (width > 0) {
+    display.fillRect(11, 48, width, 3, SSD1306_WHITE);
+  }
+
+  display.setTextSize(1);
+  display.setCursor(0, 57);
+  display.print("1:+10 2:-10 3:Back");
+
   display.display();
 }
 
-void startEmotion(EmotionMode mode, unsigned long duration) {
-  emotionMode = mode;
-  emotionUntil = millis() + duration;
-  lastEmotionFrame = 0;
-  emotionFrame = 0;
-  if (mode == EMOTION_ANGRY) playAngrySound();
-  else if (mode == EMOTION_CRYING) playCryingSound();
-}
+void changeVolume(int delta) {
+  int oldVolume = volumeLevel;
 
-void updateEmotion() {
-  if (emotionMode == EMOTION_NONE) return;
-  unsigned long now = millis();
+  volumeLevel = constrain(
+    volumeLevel + delta, VOLUME_MIN, VOLUME_MAX
+  );
 
-  bool angryStillHeld = (emotionMode == EMOTION_ANGRY &&
-                         touchState && longTouchTriggered);
-  if (!angryStillHeld && (long)(now - emotionUntil) >= 0) {
-    emotionMode = EMOTION_NONE;
-    roboEyes.setMood(DEFAULT);
-    roboEyes.setPosition(DEFAULT);
-    roboEyes.setAutoblinker(ON, 3, 2);
-    roboEyes.setIdleMode(ON, 2, 2);
-    return;
+  if (oldVolume != volumeLevel) {
+    saveSettings();
   }
 
-  if (now - lastEmotionFrame >= EMOTION_FRAME_MS) {
-    lastEmotionFrame = now;
-    emotionFrame++;
-    if (emotionMode == EMOTION_ANGRY) drawAngryFace(emotionFrame);
-    else if (emotionMode == EMOTION_CRYING) drawCryingFace(emotionFrame);
-  }
+  playTapSound();
+  resetScreenCache();
 }
 
-void returnToEyes() {
-  screenMode = MODE_EYES;
+void selectSetting() {
+  switch (settingsIndex) {
+    case 0:
+      currentMode = MODE_VOLUME;
+      resetScreenCache();
+      playConfirmSound();
+      break;
 
-  roboEyes.setMood(DEFAULT);
-  roboEyes.setPosition(DEFAULT);
-  roboEyes.setAutoblinker(ON, 3, 2);
-  roboEyes.setIdleMode(ON, 2, 2);
-}
+    case 1:
+      if (chronosWatch.isRunning()) {
+        chronosWatch.stop(true);
+        bleConnected = false;
+        Serial.println("[BLE] Stop requested");
+      } else {
+        chronosWatch.begin();
+        Serial.println("[BLE] Start requested");
+      }
 
-void enterScreen(ScreenMode newMode) {
-  screenMode = newMode;
+      resetScreenCache();
+      break;
 
-  if (screenMode == MODE_CLOCK) {
-    lastClockDraw = 0;
-    drawClock();
-  }
+    case 2:
+      currentMode = MODE_NOTIFICATION;
+      resetScreenCache();
+      playSelectSound();
+      break;
 
-  if (screenMode == MODE_WEATHER) {
-    drawWeather();
+    case 3:
+      returnHome();
+      break;
   }
 }
 
-// =====================================================
-// TAP SEQUENCE
-// 3 taps = clock
-// 4 taps = forecast
-// =====================================================
+// ============================================================
+// CHRONOS BLE CALLBACKS
+// ============================================================
 
-void handleTapSequence() {
-  uint8_t completedTaps = tapCount;
-  tapCount = 0;
-  if (completedTaps == 3) enterScreen(MODE_CLOCK);
-  else if (completedTaps == 4) enterScreen(MODE_WEATHER);
-  else if (completedTaps == 5) startEmotion(EMOTION_CRYING, CRY_DISPLAY_MS);
+void onChronosConnection(bool connected) {
+  bleConnected = connected;
+
+  Serial.println(
+    connected ? "[BLE] Connected" : "[BLE] Disconnected"
+  );
+
+  resetScreenCache();
 }
 
-// =====================================================
-// TOUCH HANDLER
-// =====================================================
+void onChronosNotification(Notification notification) {
+  lastNotificationTitle = notification.title;
+  lastNotificationBody = notification.message;
+  notificationAvailable = true;
+
+  Serial.println();
+  Serial.println("====== NOTIFICATION RECEIVED ======");
+  Serial.print("Title: ");
+  Serial.println(lastNotificationTitle);
+  Serial.print("Message: ");
+  Serial.println(lastNotificationBody);
+  Serial.println("===================================");
+
+  // Auto-show when Home is active.
+  if (currentMode == MODE_HOME) {
+    currentMode = MODE_NOTIFICATION;
+    resetScreenCache();
+  }
+}
+
+void onChronosConfiguration(
+  Config config,
+  uint32_t arg1,
+  uint32_t arg2
+) {
+  Serial.printf(
+    "[CHRONOS CONFIG] config=%d arg1=%lu arg2=%lu\n",
+    (int)config,
+    (unsigned long)arg1,
+    (unsigned long)arg2
+  );
+
+  if (config == CF_TIME ||
+      config == CF_WEATHER ||
+      config == CF_NAV_DATA ||
+      config == CF_NAV_ICON) {
+    resetScreenCache();
+  }
+
+  if (config == CF_NAV_DATA) {
+    Navigation &nav = chronosWatch.getNavigation();
+
+    Serial.println("[NAV] Navigation data event");
+    Serial.printf("Active: %d\n", nav.active);
+
+    Serial.print("Title: ");
+    Serial.println(nav.title);
+
+    Serial.print("Directions: ");
+    Serial.println(nav.directions);
+
+    Serial.print("Distance: ");
+    Serial.println(nav.distance);
+
+    Serial.print("ETA: ");
+    Serial.println(nav.eta);
+  }
+}
+
+// ============================================================
+// TOUCH ACTIONS
+// ============================================================
+
+void handleTapCount(int count) {
+  switch (currentMode) {
+    case MODE_HOME:
+      if (count == 3) {
+        currentMode = MODE_CLOCK;
+        resetScreenCache();
+        playSelectSound();
+      } else if (count == 4) {
+        currentMode = MODE_WEATHER;
+        resetScreenCache();
+        playSelectSound();
+      } else if (count >= 5) {
+        currentMode = MODE_SETTINGS;
+        settingsIndex = 0;
+        resetScreenCache();
+        playConfirmSound();
+      }
+      break;
+
+    case MODE_SETTINGS:
+      if (count == 1) {
+        settingsIndex = (settingsIndex + 1) % SETTINGS_COUNT;
+        resetScreenCache();
+        playTapSound();
+      } else if (count == 2) {
+        selectSetting();
+      } else {
+        returnHome();
+      }
+      break;
+
+    case MODE_VOLUME:
+      if (count == 1) {
+        changeVolume(VOLUME_STEP);
+      } else if (count == 2) {
+        changeVolume(-VOLUME_STEP);
+      } else {
+        currentMode = MODE_SETTINGS;
+        resetScreenCache();
+        playBackSound();
+      }
+      break;
+
+    case MODE_NOTIFICATION:
+    case MODE_CLOCK:
+    case MODE_WEATHER:
+    case MODE_NAVIGATION:
+      returnHome();
+      break;
+  }
+}
+
+void handleLongPress() {
+  switch (currentMode) {
+    case MODE_HOME:
+      currentMode = MODE_SETTINGS;
+      settingsIndex = 0;
+      resetScreenCache();
+      playConfirmSound();
+      break;
+
+    case MODE_SETTINGS:
+    case MODE_VOLUME:
+    case MODE_NOTIFICATION:
+    case MODE_CLOCK:
+    case MODE_WEATHER:
+    case MODE_NAVIGATION:
+      returnHome();
+      break;
+  }
+}
 
 void updateTouch() {
   unsigned long now = millis();
-  bool rawTouch = digitalRead(TOUCH_PIN) == HIGH;
 
-  if (rawTouch != lastRawTouch) {
-    lastRawTouch = rawTouch;
-    lastRawChange = now;
+  bool raw =
+    digitalRead(TOUCH_PIN) == TOUCH_ACTIVE_LEVEL;
+
+  if (raw != touchRawPrevious) {
+    touchRawPrevious = raw;
+    touchChangedAt = now;
   }
-  if (now - lastRawChange < TOUCH_DEBOUNCE_MS) return;
 
-  // Detect a hold while touch remains HIGH.
-  if (rawTouch && touchState && screenMode == MODE_EYES &&
-      !longTouchTriggered && now - pressStartedAt >= LONG_TOUCH_MS) {
-    longTouchTriggered = true;
+  if (now - touchChangedAt >= TOUCH_DEBOUNCE_MS &&
+      raw != touchStable) {
+
+    touchStable = raw;
+
+    if (touchStable) {
+      touchPressedAt = now;
+      touchLongHandled = false;
+
+      if (currentMode == MODE_HOME) {
+        playTapSound();
+        roboEyes.setMood(HAPPY);
+        roboEyes.setPosition(random(0, 2) == 0 ? E : W);
+      }
+
+    } else if (!touchLongHandled &&
+               now - lastTouchActionAt >= TOUCH_LOCKOUT_MS) {
+
+      lastTouchActionAt = now;
+      tapCount++;
+      lastTapAt = now;
+    }
+  }
+
+  if (touchStable &&
+      !touchLongHandled &&
+      now - touchPressedAt >= LONG_PRESS_MS) {
+
+    touchLongHandled = true;
     tapCount = 0;
-    startEmotion(EMOTION_ANGRY, LONG_TOUCH_MS + ANGRY_DISPLAY_MS);
+    handleLongPress();
   }
-  if (rawTouch == touchState) return;
 
-  touchState = rawTouch;
-  if (touchState) {
-    pressStartedAt = now;
-    longTouchTriggered = false;
+  if (tapCount > 0 &&
+      now - lastTapAt > TAP_GAP_MS) {
 
-    if (emotionMode == EMOTION_CRYING) {
-      suppressNextReleaseTap = true;
-      return;
-    }
-    // Pertahankan layar navigasi selama Google Maps masih mengirim rute.
-    if (screenMode == MODE_NAVIGATION) {
-      suppressNextReleaseTap = true;
-      return;
-    }
-    if (screenMode != MODE_EYES) {
-      returnToEyes();
-      suppressNextReleaseTap = true;
-      playTouchSound(1);
-      return;
-    }
-
-    roboEyes.setMood(HAPPY);
-    roboEyes.setAutoblinker(OFF);
-    roboEyes.setIdleMode(OFF);
-    if (moveNE) roboEyes.setPosition(NE);
-    else roboEyes.setPosition(NW);
-    moveNE = !moveNE;
-    playTouchSound((tapCount < 4) ? (tapCount + 1) : 1);
-  } else {
-    if (suppressNextReleaseTap) {
-      suppressNextReleaseTap = false;
-      longTouchTriggered = false;
-      return;
-    }
-    if (longTouchTriggered) {
-      emotionUntil = millis() + ANGRY_DISPLAY_MS;
-      longTouchTriggered = false;
-      return;
-    }
-    if (screenMode == MODE_EYES && emotionMode != EMOTION_CRYING) {
-      roboEyes.setMood(DEFAULT);
-      roboEyes.setAutoblinker(ON, 3, 2);
-      roboEyes.setIdleMode(ON, 2, 2);
-      if (tapCount < 5) tapCount++;
-      lastTapTime = now;
-    }
+    int count = tapCount;
+    tapCount = 0;
+    handleTapCount(count);
   }
 }
 
-// Baca state navigasi yang diperbarui oleh ChronosESP32 saat data BLE masuk.
-// Navigasi otomatis mengambil alih OLED, lalu kembali ke RoboEyes saat rute selesai.
-void updateNavigationMode() {
+// ============================================================
+// AUTOMATIC NAVIGATION OVERRIDE
+// ============================================================
+
+void updateNavigationOverride() {
+  if (!bleConnected) {
+    if (currentMode == MODE_NAVIGATION) {
+      currentMode = MODE_HOME;
+      resetScreenCache();
+    }
+    return;
+  }
+
   Navigation &nav = chronosWatch.getNavigation();
-  bool activeNow = nav.active && nav.isNavigation;
 
-  if (activeNow) {
-    if (!navigationWasActive || screenMode != MODE_NAVIGATION) {
-      screenMode = MODE_NAVIGATION;
-      lastNavigationDraw = 0;
-      Serial.println("Navigasi aktif: OLED masuk mode ZORA NAV");
-    }
-    navigationWasActive = true;
+  if (currentMode == MODE_HOME && nav.active) {
+    Serial.println("[NAV] Taking over Home screen");
+    currentMode = MODE_NAVIGATION;
+    resetScreenCache();
 
-    if (millis() - lastNavigationDraw >= 250UL) {
-      lastNavigationDraw = millis();
-      drawNavigation();
-    }
-  } else if (navigationWasActive) {
-    navigationWasActive = false;
-    Serial.println("Navigasi selesai: kembali ke RoboEyes");
-    returnToEyes();
+  } else if (currentMode == MODE_NAVIGATION &&
+             !nav.active) {
+
+    Serial.println("[NAV] Route inactive; returning Home");
+    currentMode = MODE_HOME;
+    resetScreenCache();
   }
 }
 
+// ============================================================
+// SCREEN RENDERING
+// ============================================================
+
+void renderCurrentScreen() {
+  switch (currentMode) {
+    case MODE_HOME:
+      roboEyes.update();
+      break;
+
+    case MODE_SETTINGS:
+      if (lastDrawnMode != MODE_SETTINGS ||
+          lastDrawnSettingsIndex != settingsIndex ||
+          lastDrawnBle != chronosWatch.isRunning()) {
+        drawSettings();
+        lastDrawnSettingsIndex = settingsIndex;
+        lastDrawnBle = chronosWatch.isRunning();
+      }
+      break;
+
+    case MODE_VOLUME:
+      if (lastDrawnMode != MODE_VOLUME ||
+          lastDrawnVolume != volumeLevel) {
+        drawVolumeScreen();
+        lastDrawnVolume = volumeLevel;
+      }
+      break;
+
+    case MODE_NOTIFICATION:
+      if (lastDrawnMode != MODE_NOTIFICATION) {
+        drawNotificationScreen();
+      }
+      break;
+
+    case MODE_CLOCK:
+      drawClockScreen();
+      break;
+
+    case MODE_WEATHER:
+      drawWeatherScreen();
+      break;
+
+    case MODE_NAVIGATION:
+      drawNavigationScreen();
+      break;
+  }
+
+  lastDrawnMode = currentMode;
+}
+
+// ============================================================
 // SETUP
-// =====================================================
+// ============================================================
 
 void setup() {
   Serial.begin(115200);
-
-  // Inisialisasi buzzer lebih dulu, tetapi melodi dimainkan
-  // setelah OLED siap agar animasi boot bisa tampil bersamaan.
-  bool buzzerReady = initBuzzer();
-  if (!buzzerReady) {
-    Serial.println("ERROR: LEDC buzzer gagal diinisialisasi!");
-  }
+  delay(150);
 
   pinMode(TOUCH_PIN, INPUT);
+  pinMode(BUZZER_PIN, OUTPUT);
+  noTone(BUZZER_PIN);
 
   Wire.begin(OLED_SDA, OLED_SCL);
 
-  if (!display.begin(
-        SSD1306_SWITCHCAPVCC,
-        OLED_ADDR
-      )) {
-    Serial.println("ERROR: OLED tidak terdeteksi!");
-
-    while (true) {
-      delay(1000);
-    }
+  if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) {
+    Serial.println("[OLED] Initialization failed!");
+    while (true) delay(100);
   }
 
   display.clearDisplay();
   display.display();
 
-  if (buzzerReady) {
-    delay(50);
-    bootAnimationAndWelcome();
-  } else {
-    display.clearDisplay();
-    display.setTextColor(SSD1306_WHITE);
-    display.setTextSize(2);
-    display.setCursor(31, 10);
-    display.print("ZORA");
-    display.setTextSize(1);
-    display.setCursor(10, 35);
-    display.print("BUZZER NOT READY");
-    display.display();
-    delay(700);
-  }
+  loadSettings();
+  showBootSplash();
 
-  roboEyes.begin(SCREEN_WIDTH, SCREEN_HEIGHT, 100);
-  roboEyes.setPosition(DEFAULT);
-  roboEyes.setMood(DEFAULT);
+  roboEyes.begin(OLED_WIDTH, OLED_HEIGHT, 100);
   roboEyes.setAutoblinker(ON, 3, 2);
   roboEyes.setIdleMode(ON, 2, 2);
+  roboEyes.setMood(DEFAULT);
+  roboEyes.setPosition(DEFAULT);
 
-  // Chronos BLE only: Wi-Fi dan OpenWeather sengaja tidak dipakai.
-  chronosWatch.setConnectionCallback(chronosConnectionCallback);
-  chronosWatch.setNotificationCallback(chronosNotificationCallback);
-  chronosWatch.setConfigurationCallback(chronosConfigCallback);
-  chronosWatch.set24Hour(true);
+  chronosWatch.setConnectionCallback(onChronosConnection);
+  chronosWatch.setNotificationCallback(onChronosNotification);
+  chronosWatch.setConfigurationCallback(onChronosConfiguration);
+
   chronosWatch.begin();
-  Serial.print("Nama BLE ZORA: ZORA | Alamat: ");
-  Serial.println(chronosWatch.getAddress());
 
-  Serial.println("RoboEyes + Chronos BLE Clock/Weather/Notifications/Navigation siap (tanpa Wi-Fi)!");
-  Serial.println("3 tap = jam | 4 tap = cuaca | 5 tap = menangis | tahan 900ms = marah | Maps aktif = navigasi OLED");
+  randomSeed(micros());
+  resetScreenCache();
+
+  Serial.println("[ZORA] Ready");
+  Serial.println("[ZORA] Serial Monitor: 115200 baud");
 }
 
-// =====================================================
-// LOOP
-// =====================================================
+// ============================================================
+// MAIN LOOP
+// ============================================================
 
 void loop() {
-  chronosWatch.loop();  // wajib dipanggil terus untuk BLE dan sinkronisasi waktu
-  updateNavigationMode();
   updateTouch();
+
+  // Chronos BLE needs continuous polling.
+  chronosWatch.loop();
+
   updateBuzzer();
+  updateNavigationOverride();
+  renderCurrentScreen();
 
-  // 3 tap = jam, 4 tap = cuaca, 5 tap = menangis.
-  if (screenMode == MODE_EYES && emotionMode == EMOTION_NONE &&
-      tapCount > 0 && millis() - lastTapTime >= TAP_TIMEOUT_MS) {
-    handleTapSequence();
-  }
-
-  if (emotionMode != EMOTION_NONE) {
-    updateEmotion();
-    return;
-  }
-
-  if (screenMode == MODE_NAVIGATION) {
-    // Layar navigasi digambar periodik oleh updateNavigationMode().
-  } else if (screenMode == MODE_NOTIFICATION) {
-    if ((long)(millis() - notificationUntil) >= 0) {
-      returnToEyes();
-    } else {
-      // Callback draws immediately; keep this mode until timeout.
-    }
-  } else if (screenMode == MODE_CLOCK) {
-    if (millis() - lastClockDraw >= CLOCK_REFRESH_MS) {
-      lastClockDraw = millis();
-      drawClock();
-    }
-  } else if (screenMode == MODE_WEATHER) {
-    // Cuaca dibaca dari cache Chronos; tidak ada request internet dari ESP32.
-    static unsigned long lastWeatherDraw = 0;
-    if (millis() - lastWeatherDraw >= 2000UL) {
-      lastWeatherDraw = millis();
-      drawWeather();
-    }
-  } else {
-    roboEyes.update();
-  }
+  delay(1);
 }
