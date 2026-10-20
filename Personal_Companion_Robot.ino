@@ -41,8 +41,8 @@ static constexpr int ZORA_EYE_POSITION_WEST = 7;
 // after the code before using it for a real firmware update.
 // ============================================================
 #define ZORA_FIRMWARE_VERSION "1.0.0"
-const char* WIFI_SSID = "ZACKDIR";
-const char* WIFI_PASSWORD = "rosenbloom31";
+const char* WIFI_SSID = "your-wifi-ssid";
+const char* WIFI_PASSWORD = "your-wifi-pwd";
 const char* GITHUB_RELEASE_API = "https://api.github.com/repos/zaldyprtm/zora-desk-companion/releases/latest";
 const char* GITHUB_USER_AGENT = "ZORA-Desk-Companion";
 const unsigned long WIFI_CONNECT_TIMEOUT_MS = 15000UL;
@@ -50,7 +50,7 @@ const unsigned long WIFI_CONNECT_TIMEOUT_MS = 15000UL;
 Adafruit_SSD1306 display(OLED_WIDTH, OLED_HEIGHT, &Wire, -1);
 RoboEyes<Adafruit_SSD1306> roboEyes(display);
 Preferences preferences;
-ChronosESP32 chronosWatch("ZORA");
+ChronosESP32 chronosWatch("ZORA-ZDY");
 
 enum AppMode {
   MODE_HOME,
@@ -310,7 +310,7 @@ void showBootSplash() {
   display.println("BY ZDYVOID");
 
   display.setCursor(16, 46);
-  display.println("YOUR COMPANION");
+  display.println("YOUR POCKET COMPANION");
 
   display.display();
   delay(1200);
@@ -858,6 +858,10 @@ bool checkLatestGitHubRelease() {
   https.addHeader("User-Agent", GITHUB_USER_AGENT);
   https.addHeader("Accept", "application/vnd.github+json");
   int code = https.GET();
+
+Serial.printf("[OTA] HTTP code: %d\n", code);
+Serial.printf("[OTA] Error: %s\n",
+              https.errorToString(code).c_str());
   if (code != HTTP_CODE_OK) {
     otaStatusMessage = "GitHub HTTP " + String(code);
     https.end(); cleanupOTAWiFi(); otaBusy = false; resetScreenCache(); return false;
